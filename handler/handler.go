@@ -3,15 +3,65 @@ package handler
 import (
 	"encoding/json"
 	"filestore-server/util"
+	dblayer "filestore-server/db"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"filestore-server/meta"
 )
+
+// TryFastUploadHandler：尝试妙传接口
+func TryFastUploadHandler(w http.ResponseWriter, r *http.Request)  {
+	r.ParseForm()
+
+	// 1、解析请求参数
+	username := r.Form.Get("username")
+	filehash := r.Form.Get("filehash")
+	filename := r.Form.Get("filename")
+	filesize, _ := strconv.Atoi(r.Form.Get("filesize"))
+
+
+	// 2、从文件表中查询相同hash的文件记录
+	filemeta, err := meta.GetFileMetaDB(filehash)
+	if err != nil {
+		fmt.Println(err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// 3、查不到记录则返回妙传失败
+	if filemeta == nil {
+		resp := util.RespMsg{
+			Code: -1,
+			Msg: "妙传失败，请访问普通上传接口",
+		}
+		w.Write(resp.JSONBytes())
+		return
+	}
+
+	// 4、上传过则将文件信息写入用户文件表，返回成功
+	suc := dblayer.OnUserFileUploadFinished(username, filehash, filename, int64(filesize))
+	if suc {
+		resp := util.RespMsg{
+			Code: 0,
+			Msg: "妙传成功",
+		}
+		w.Write(resp.JSONBytes())
+		return
+	} else {
+		resp := util.RespMsg{
+			Code: -2,
+			Msg: "妙传失败，请稍后重试",
+		}
+		w.Write(resp.JSONBytes())
+		return
+	}
+}
 
 // 处理文件上传
 func UploadHandler(w http.ResponseWriter, r *http.Request)  {
@@ -58,9 +108,21 @@ func UploadHandler(w http.ResponseWriter, r *http.Request)  {
 		fileMeta.FileSha1 = util.FileSha1(newFile)
 		//meta.UpdateFileMeta(fileMeta)
 		_ = meta.UpdateFileMetaDB(fileMeta)
-		fmt.Printf("fileMeta: %+v", fileMeta)
 
-		http.Redirect(w, r, "/file/upload/suc", http.StatusFound)
+		// TODO: 更新用户文件表记录
+		r.ParseForm()
+		username := r.Form.Get("username")
+
+		suc := dblayer.OnUserFileUploadFinished(username, fileMeta.FileSha1, fileMeta.FileName, fileMeta.FileSize)
+		if suc {
+			http.Redirect(w, r, "/static/view/home.html", http.StatusFound)
+		} else
+		{
+			w.Write([]byte("Upload Failed."))
+		}
+
+		//fmt.Printf("fileMeta: %+v", fileMeta)
+		//http.Redirect(w, r, "/file/upload/suc", http.StatusFound)
 	}
 }
 
@@ -79,6 +141,25 @@ func GetFileMetaHandler(w http.ResponseWriter, r *http.Request)  {
 		return
 	}
 	data, err := json.Marshal(fmeta)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Write(data)
+}
+
+// 批量获取文件元信息
+func FileQueryHandler(w http.ResponseWriter, r *http.Request)  {
+	r.ParseForm()
+	limit, err := strconv.Atoi(r.Form.Get("limit"))
+	username := r.Form.Get("username")
+	fileMetas, err := dblayer.QueryUserFileInfo(username, int(limit))
+	if err != nil {
+		fmt.Println(err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	data, err := json.Marshal(fileMetas)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
